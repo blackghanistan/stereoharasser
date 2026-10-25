@@ -1,0 +1,71 @@
+name: Build StereoHarasser (macOS, AU + VST3, universal)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master ]
+
+env:
+  JUCE_TAG: 8.0.8   # any 8.0.x tag
+
+jobs:
+  macos-universal:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Get JUCE
+        run: git clone --depth 1 --branch "$JUCE_TAG" https://github.com/juce-framework/JUCE.git JUCE
+
+      # CMakeLists.txt already asks for arm64 + x86_64, so this is one universal binary
+      - name: Configure
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DBLG_COPY_AFTER_BUILD=OFF
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Sign and package
+        run: |
+          set -euo pipefail
+          OUT=StereoHarasser-macOS
+          mkdir -p "$OUT"
+
+          VST3=$(find build -type d -name "StereoHarasser.vst3" -print -quit)
+          AU=$(find build -type d -name "StereoHarasser.component" -print -quit)
+          test -n "$VST3"
+          test -n "$AU"
+
+          cp -R "$VST3" "$AU" "$OUT/"
+          cp Tools/install-mac.command "$OUT/Install.command"
+          cp Tools/README-macOS.txt "$OUT/READ ME FIRST.txt"
+          chmod +x "$OUT/Install.command"
+
+          # Apple Silicon refuses to load unsigned code; an ad-hoc signature is enough for
+          # plug-ins that are installed on the same Mac they were downloaded to
+          codesign --force --deep --sign - "$OUT/StereoHarasser.vst3"
+          codesign --force --deep --sign - "$OUT/StereoHarasser.component"
+          codesign --verify --deep --strict "$OUT/StereoHarasser.vst3"
+          codesign --verify --deep --strict "$OUT/StereoHarasser.component"
+
+          echo "Architectures:"
+          lipo -info "$OUT/StereoHarasser.vst3/Contents/MacOS/StereoHarasser"
+          lipo -info "$OUT/StereoHarasser.component/Contents/MacOS/StereoHarasser"
+
+          # ditto keeps the executable bit and bundle metadata that a plain zip can lose
+          ditto -c -k --keepParent "$OUT" "$OUT.zip"
+
+      - name: Validate the Audio Unit with auval (informational)
+        continue-on-error: true
+        run: |
+          mkdir -p ~/Library/Audio/Plug-Ins/Components
+          cp -R StereoHarasser-macOS/StereoHarasser.component ~/Library/Audio/Plug-Ins/Components/
+          killall -9 AudioComponentRegistrar || true
+          sleep 2
+          auval -v aufx Blg1 Bkgh
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: StereoHarasser-macOS-universal
+          path: StereoHarasser-macOS.zip
+          if-no-files-found: error
